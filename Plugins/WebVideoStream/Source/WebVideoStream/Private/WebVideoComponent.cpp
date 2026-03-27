@@ -26,7 +26,7 @@ void UWebVideoComponent::BeginPlay()
     UpdateRegion = FUpdateTextureRegion2D(0, 0, 0, 0, VideoWidth, VideoHeight);
 
     const char* const vlc_args[] = { "--no-osd", "--no-video-title-show", "--vout=vmem" };
-    VLCInstance = libvlc_new(sizeof(vlc_args) / sizeof(vlc_args[0]), vlc_args);
+    VLCInstance = libvlc_new(std::size(vlc_args), vlc_args);
 
     if (VLCInstance)
     {
@@ -39,12 +39,32 @@ void UWebVideoComponent::BeginPlay()
             libvlc_audio_set_volume(VLCMediaPlayer, InitialVolume);
         }
 
-        if (BaseMaterial)
+        ResolvedMesh = Cast<UMeshComponent>(TargetMesh.GetComponent(GetOwner()));
+        
+        if (!ResolvedMesh)
         {
-            if (UMeshComponent* Mesh = GetOwner()->FindComponentByClass<UMeshComponent>())
+            ResolvedMesh = GetOwner()->FindComponentByClass<UMeshComponent>();
+        }
+
+        if (ResolvedMesh && BaseMaterial)
+        {
+            if (bUseMaterialSlot)
             {
-                DynamicMat = Mesh->CreateDynamicMaterialInstance(0, BaseMaterial);
-                DynamicMat->SetTextureParameterValue(FName("VideoInput"), DynamicTexture);
+                DynamicMat = ResolvedMesh->CreateDynamicMaterialInstance(TargetMaterialSlot, BaseMaterial);
+            }
+            else
+            {
+                DynamicMat = ResolvedMesh->CreateDynamicMaterialInstance(0, BaseMaterial);
+                for (int32 i = 1; i < ResolvedMesh->GetNumMaterials(); ++i)
+                {
+                    ResolvedMesh->SetMaterial(i, DynamicMat);
+                }
+            }
+
+            if (DynamicMat)
+            {
+                DynamicMat->SetTextureParameterValue(TextureParameterName, DynamicTexture);
+                UpdateSurfaceAspectRatio();
             }
         }
 
@@ -141,14 +161,14 @@ EWebVideoState UWebVideoComponent::GetCurrentPlayerState()
 
 float UWebVideoComponent::GetCurrentTime()
 {
-    return (VLCMediaPlayer) ? (float)libvlc_media_player_get_time(VLCMediaPlayer) / 1000.0f : 0.0f;
+    return (VLCMediaPlayer) ? static_cast<float>(libvlc_media_player_get_time(VLCMediaPlayer)) / 1000.0f : 0.0f;
 }
 
 float UWebVideoComponent::GetTotalDuration()
 {
     if (!VLCMediaPlayer) return 0.0f;
     int64 Length = libvlc_media_player_get_length(VLCMediaPlayer);
-    return (Length <= 0) ? CurrentVideoDuration : (float)Length / 1000.0f;
+    return (Length <= 0) ? CurrentVideoDuration : static_cast<float>(Length) / 1000.0f;
 }
 
 void UWebVideoComponent::Update3DAudio()
@@ -158,7 +178,8 @@ void UWebVideoComponent::Update3DAudio()
     {
         if (APawn* Pawn = PC->GetPawn())
         {
-            float Dist = FVector::Dist(Pawn->GetActorLocation(), GetOwner()->GetActorLocation());
+            FVector SourcePos = ResolvedMesh ? ResolvedMesh->GetComponentLocation() : GetOwner()->GetActorLocation();
+            float Dist = FVector::Dist(Pawn->GetActorLocation(), SourcePos);
             float Alpha = 1.0f - FMath::Clamp((Dist - MinSoundDistance) / (MaxSoundDistance - MinSoundDistance), 0.0f, 1.0f);
             libvlc_audio_set_volume(VLCMediaPlayer, FMath::RoundToInt(Alpha * InitialVolume));
         }
@@ -168,10 +189,71 @@ void UWebVideoComponent::Update3DAudio()
 void UWebVideoComponent::UpdateTexture()
 {
     if (!DynamicTexture || !DynamicTexture->GetResource() || PixelBuffer.Num() == 0) return;
+    
+    if (DynamicMat && VLCMediaPlayer)
+    {
+        unsigned int Width, Height;
+        if (libvlc_video_get_size(VLCMediaPlayer, 0, &Width, &Height) == 0)
+        {
+            float Ratio = static_cast<float>(Width) / static_cast<float>(Height);
+            DynamicMat->SetScalarParameterValue(FName("VideoAspectRatio"), Ratio);
+        }
+    }
     if (RenderMutex.TryLock())
     {
         DynamicTexture->UpdateTextureRegions(0, 1, &UpdateRegion, (uint32)(VideoWidth * 4), (uint32)4, PixelBuffer.GetData());
         RenderMutex.Unlock();
+    }
+}
+
+void UWebVideoComponent::UpdateSurfaceAspectRatio()
+{
+    if (!ResolvedMesh || !DynamicMat) return;
+
+    UStaticMeshComponent* StaticMeshComp = Cast<UStaticMeshComponent>(ResolvedMesh);
+    if (!StaticMeshComp || !StaticMeshComp->GetStaticMesh()) return;
+
+    FStaticMeshRenderData* RenderData = StaticMeshComp->GetStaticMesh()->GetRenderData();
+    if (!RenderData || !RenderData->LODResources.IsValidIndex(0)) return;
+
+    FStaticMeshLODResources& LOD = RenderData->LODResources[0];
+    
+    FVector MinBounds(FLT_MAX);
+    FVector MaxBounds(-FLT_MAX);
+    bool bFoundAny = false;
+
+    int32 SlotToCheck = bUseMaterialSlot ? TargetMaterialSlot : 0;
+
+    for (const FStaticMeshSection& Section : LOD.Sections)
+    {
+        if (Section.MaterialIndex == SlotToCheck)
+        {
+            for (uint32 i = 0; i < Section.NumTriangles * 3; i++)
+            {
+                uint32 VertexIndex = LOD.IndexBuffer.GetIndex(Section.FirstIndex + i);
+                FVector Pos = static_cast<FVector>(LOD.VertexBuffers.PositionVertexBuffer.VertexPosition(VertexIndex));
+
+                MinBounds = MinBounds.ComponentMin(Pos);
+                MaxBounds = MaxBounds.ComponentMax(Pos);
+                bFoundAny = true;
+            }
+        }
+    }
+
+    if (bFoundAny)
+    {
+        FVector Size = MaxBounds - MinBounds;
+
+        float Horizontal = FMath::Max(Size.X, Size.Y); 
+        float Vertical = Size.Z;
+
+        if (Vertical > 0.1f)
+        {
+            float SurfaceRatio = Horizontal / Vertical;
+            
+            DynamicMat->SetScalarParameterValue(TEXT("SurfaceAspectRatio"), SurfaceRatio);
+            UE_LOG(LogTemp, Log, TEXT("WebVideo: Auto-Detected Screen Ratio: %f (H:%f V:%f)"), SurfaceRatio, Horizontal, Vertical);
+        }
     }
 }
 

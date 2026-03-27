@@ -25,26 +25,40 @@ class WEBVIDEOSTREAM_API UWebVideoComponent : public UActorComponent
 public:	
     UWebVideoComponent();
 
-    // --- Settings ---
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo")
+    // --- Settings: Rendering ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings")
+    FComponentReference TargetMesh;
+
+    UPROPERTY(EditAnywhere, Category = "WebVideo|Settings")
+    UMaterialInterface* BaseMaterial;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings")
+    FName TextureParameterName = FName("VideoInput");
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings")
+    bool bUseMaterialSlot = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings", meta = (EditCondition = "bUseMaterialSlot"))
+    int32 TargetMaterialSlot = 0;
+    
+    // --- Settings: Playback ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings")
     FString InitialYouTubeURL;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings")
     bool bAutoPlayOnStart = false;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings")
     bool bLoopVideo = false;
 
-    UPROPERTY(EditAnywhere, Category = "WebVideo")
-    UMaterialInterface* BaseMaterial;
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo", meta = (ClampMin = "0", ClampMax = "100"))
+    // --- Settings: Audio ---
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Audio", meta = (ClampMin = "0", ClampMax = "100"))
     int32 InitialVolume = 75;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Audio")
     float MinSoundDistance = 500.0f;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Audio")
     float MaxSoundDistance = 3500.0f;
 
     // --- Events ---
@@ -98,9 +112,13 @@ private:
     libvlc_media_player_t* VLCMediaPlayer = nullptr;
 
     void UpdateTexture();
+    void UpdateSurfaceAspectRatio();
     static void* vlc_video_lock(void* data, void** p_pixels);
     static void vlc_video_unlock(void* data, void* id, void* const* p_pixels);
     static void vlc_video_display(void* data, void* id);
+    
+    UPROPERTY()
+    UMeshComponent* ResolvedMesh;
 
     UPROPERTY()
     UTexture2D* DynamicTexture;
