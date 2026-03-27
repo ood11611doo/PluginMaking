@@ -8,6 +8,9 @@
 #include "vlc/vlc.h"
 #include "WebVideoComponent.generated.h"
 
+class UAudioComponent;
+class USoundWaveProcedural;
+
 UENUM(BlueprintType)
 enum class EWebVideoState : uint8
 {
@@ -113,6 +116,12 @@ protected:
 
     UPROPERTY(BlueprintReadOnly, Category = "WebVideo")
     float CurrentVideoDuration = 0.0f;
+    
+    UPROPERTY()
+    UAudioComponent* AudioComponent;
+
+    UPROPERTY()
+    USoundWaveProcedural* AudioStream;
 
 
 private:
@@ -136,12 +145,12 @@ private:
 
     void UpdateTexture();
     void UpdateSurfaceAspectRatio();
-    void Update3DAudio();
     void PrivatePlayVideo(FString DirectURL);
     
     static void* VLCVidLock(void* data, void** p_pixels);
     static void VLCVidUnlock(void* data, void* id, void* const* p_pixels);
     static void VLCVidDisplay(void* data, void* id);
+    static void VLCAudPlay(void* Data, const void* Samples, uint32_t Count, int64_t PTS);
     
     // --- Editors only ---
 #if WITH_EDITOR
