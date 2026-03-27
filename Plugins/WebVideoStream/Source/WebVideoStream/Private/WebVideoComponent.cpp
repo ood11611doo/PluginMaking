@@ -4,12 +4,14 @@
 #include "WebVideoComponent.h"
 #include "Components/MeshComponent.h"
 #include "HttpModule.h"
+#include "Components/AudioComponent.h"
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "GenericPlatform/GenericPlatformHttp.h"
+#include "Sound/SoundWaveProcedural.h"
 
 UWebVideoComponent::UWebVideoComponent()
 {
@@ -32,6 +34,34 @@ void UWebVideoComponent::BeginPlay()
     PixelBuffer.SetNumZeroed(VideoWidth * VideoHeight * 4);
     UpdateRegion = FUpdateTextureRegion2D(0, 0, 0, 0, VideoWidth, VideoHeight);
 
+    AudioStream = NewObject<USoundWaveProcedural>(this);
+    AudioStream->SetSampleRate(44100);
+    AudioStream->NumChannels = 2;
+    AudioStream->bLooping = false;
+    
+    AudioStream->VirtualizationMode = EVirtualizationMode::PlayWhenSilent;
+    
+    AudioComponent = NewObject<UAudioComponent>(this);
+    AudioComponent->bAutoActivate = true;
+    AudioComponent->SetSound(AudioStream);
+    
+    AudioComponent->bAllowSpatialization = true;
+    AudioComponent->bOverrideAttenuation = true;
+    
+    FSoundAttenuationSettings AttenuationSettings;
+    AttenuationSettings.bSpatialize = true;
+    AttenuationSettings.SpatializationAlgorithm = ESoundSpatializationAlgorithm::SPATIALIZATION_Default;
+    AttenuationSettings.DistanceAlgorithm = EAttenuationDistanceModel::Linear;
+    AttenuationSettings.FalloffMode = ENaturalSoundFalloffMode::Continues;
+    AttenuationSettings.AttenuationShape = EAttenuationShape::Sphere;
+    
+    AttenuationSettings.AttenuationShapeExtents = FVector(MinSoundDistance, 0.f, 0.f);
+    AttenuationSettings.FalloffDistance = MaxSoundDistance - MinSoundDistance;
+
+    AudioComponent->AttenuationOverrides = AttenuationSettings;
+    AudioComponent->SetVolumeMultiplier(static_cast<float>(InitialVolume) / 100.0f);
+    AudioComponent->RegisterComponent();
+
     const char* const vlc_args[] = { "--no-osd", "--no-video-title-show", "--vout=vmem" };
     VLCInstance = libvlc_new(std::size(vlc_args), vlc_args);
 
@@ -43,35 +73,41 @@ void UWebVideoComponent::BeginPlay()
         {
             libvlc_video_set_callbacks(VLCMediaPlayer, VLCVidLock, VLCVidUnlock, VLCVidDisplay, this);
             libvlc_video_set_format(VLCMediaPlayer, "RV32", VideoWidth, VideoHeight, VideoWidth * 4);
-            libvlc_audio_set_volume(VLCMediaPlayer, InitialVolume);
+
+            libvlc_audio_set_callbacks(VLCMediaPlayer, VLCAudPlay, nullptr, nullptr, nullptr, nullptr, this);
+            libvlc_audio_set_format(VLCMediaPlayer, "S16N", 44100, 2);
         }
 
         ResolvedMesh = Cast<UMeshComponent>(TargetMesh.GetComponent(GetOwner()));
-        
         if (!ResolvedMesh)
         {
             ResolvedMesh = GetOwner()->FindComponentByClass<UMeshComponent>();
         }
 
-        if (ResolvedMesh && BaseMaterial)
+        if (ResolvedMesh)
         {
-            if (bUseMaterialSlot)
-            {
-                DynamicMat = ResolvedMesh->CreateDynamicMaterialInstance(TargetMaterialSlot, BaseMaterial);
-            }
-            else
-            {
-                DynamicMat = ResolvedMesh->CreateDynamicMaterialInstance(0, BaseMaterial);
-                for (int32 i = 1; i < ResolvedMesh->GetNumMaterials(); ++i)
-                {
-                    ResolvedMesh->SetMaterial(i, DynamicMat);
-                }
-            }
+            AudioComponent->AttachToComponent(ResolvedMesh, FAttachmentTransformRules::KeepRelativeTransform);
 
-            if (DynamicMat)
+            if (BaseMaterial)
             {
-                DynamicMat->SetTextureParameterValue(TextureParameterName, DynamicTexture);
-                UpdateSurfaceAspectRatio();
+                if (bUseMaterialSlot)
+                {
+                    DynamicMat = ResolvedMesh->CreateDynamicMaterialInstance(TargetMaterialSlot, BaseMaterial);
+                }
+                else
+                {
+                    DynamicMat = ResolvedMesh->CreateDynamicMaterialInstance(0, BaseMaterial);
+                    for (int32 i = 1; i < ResolvedMesh->GetNumMaterials(); ++i)
+                    {
+                        ResolvedMesh->SetMaterial(i, DynamicMat);
+                    }
+                }
+
+                if (DynamicMat)
+                {
+                    DynamicMat->SetTextureParameterValue(TextureParameterName, DynamicTexture);
+                    UpdateSurfaceAspectRatio();
+                }
             }
         }
 
@@ -102,7 +138,6 @@ void UWebVideoComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
     }
 
     UpdateTexture();
-    Update3DAudio();
 }
 
 void UWebVideoComponent::PlayVideo(FString YouTubeURL)
@@ -249,20 +284,6 @@ void UWebVideoComponent::UpdateSurfaceAspectRatio()
         }
     }
 }
-void UWebVideoComponent::Update3DAudio()
-{
-    if (!VLCMediaPlayer) return;
-    if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
-    {
-        if (APawn* Pawn = PC->GetPawn())
-        {
-            FVector SourcePos = ResolvedMesh ? ResolvedMesh->GetComponentLocation() : GetOwner()->GetActorLocation();
-            float Dist = FVector::Dist(Pawn->GetActorLocation(), SourcePos);
-            float Alpha = 1.0f - FMath::Clamp((Dist - MinSoundDistance) / (MaxSoundDistance - MinSoundDistance), 0.0f, 1.0f);
-            libvlc_audio_set_volume(VLCMediaPlayer, FMath::RoundToInt(Alpha * InitialVolume));
-        }
-    }
-}
 void UWebVideoComponent::PrivatePlayVideo(FString DirectURL)
 {
     if (!VLCInstance || !VLCMediaPlayer) return;
@@ -286,3 +307,11 @@ void UWebVideoComponent::VLCVidUnlock(void* data, void* id, void* const* p_pixel
     if (UWebVideoComponent* Self = static_cast<UWebVideoComponent*>(data)) Self->RenderMutex.Unlock();
 }
 void UWebVideoComponent::VLCVidDisplay(void* data, void* id) {}
+void UWebVideoComponent::VLCAudPlay(void* Data, const void* Samples, uint32_t Count, int64_t PTS)
+{
+    UWebVideoComponent* Self = static_cast<UWebVideoComponent*>(Data);
+    if (Self && Self->AudioStream && Samples)
+    {
+        Self->AudioStream->QueueAudio(static_cast<const uint8*>(Samples), Count * 4);
+    }
+}
