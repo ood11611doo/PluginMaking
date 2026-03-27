@@ -14,6 +14,13 @@
 UWebVideoComponent::UWebVideoComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
+    
+    static ConstructorHelpers::FObjectFinder<UMaterialInterface> MaterialAsset(TEXT("/WebVideoStream/M_WebVideoMaterial.M_WebVideoMaterial"));
+
+    if (MaterialAsset.Succeeded())
+    {
+        BaseMaterial = MaterialAsset.Object;
+    }
 }
 
 void UWebVideoComponent::BeginPlay()
@@ -34,7 +41,7 @@ void UWebVideoComponent::BeginPlay()
 
         if (VLCMediaPlayer)
         {
-            libvlc_video_set_callbacks(VLCMediaPlayer, vlc_video_lock, vlc_video_unlock, vlc_video_display, this);
+            libvlc_video_set_callbacks(VLCMediaPlayer, VLCVidLock, VLCVidUnlock, VLCVidDisplay, this);
             libvlc_video_set_format(VLCMediaPlayer, "RV32", VideoWidth, VideoHeight, VideoWidth * 4);
             libvlc_audio_set_volume(VLCMediaPlayer, InitialVolume);
         }
@@ -71,7 +78,12 @@ void UWebVideoComponent::BeginPlay()
         if (bAutoPlayOnStart && !InitialYouTubeURL.IsEmpty()) PlayVideo(InitialYouTubeURL);
     }
 }
-
+void UWebVideoComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+    if (VLCMediaPlayer) { libvlc_media_player_stop(VLCMediaPlayer); libvlc_media_player_release(VLCMediaPlayer); }
+    if (VLCInstance) libvlc_release(VLCInstance);
+    Super::EndPlay(EndPlayReason);
+}
 void UWebVideoComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
@@ -112,13 +124,12 @@ void UWebVideoComponent::PlayVideo(FString YouTubeURL)
             {
                 CurrentVideoTitle = JsonObject->GetStringField(TEXT("title"));
                 CurrentVideoDuration = JsonObject->GetNumberField(TEXT("duration"));
-                Internal_StartVideo(JsonObject->GetStringField(TEXT("direct_url")));
+                PrivatePlayVideo(JsonObject->GetStringField(TEXT("direct_url")));
             }
         }
     });
     Request->ProcessRequest();
 }
-
 void UWebVideoComponent::SetPaused(bool bPause)
 {
     if (!VLCMediaPlayer) return;
@@ -126,23 +137,19 @@ void UWebVideoComponent::SetPaused(bool bPause)
     if (bPause && State == EWebVideoState::Playing) libvlc_media_player_set_pause(VLCMediaPlayer, 1);
     else if (!bPause && State == EWebVideoState::Paused) libvlc_media_player_set_pause(VLCMediaPlayer, 0);
 }
-
 void UWebVideoComponent::StopVideo()
 {
     if (VLCMediaPlayer) libvlc_media_player_stop(VLCMediaPlayer);
 }
-
 void UWebVideoComponent::SeekToTime(float Seconds)
 {
     if (VLCMediaPlayer) libvlc_media_player_set_time(VLCMediaPlayer, (int64)(Seconds * 1000.0f));
 }
-
 void UWebVideoComponent::SetVolume(int32 Volume)
 {
     InitialVolume = FMath::Clamp(Volume, 0, 100);
     if (VLCMediaPlayer) libvlc_audio_set_volume(VLCMediaPlayer, InitialVolume);
 }
-
 EWebVideoState UWebVideoComponent::GetCurrentPlayerState()
 {
     if (!VLCMediaPlayer) return EWebVideoState::Idle;
@@ -158,32 +165,15 @@ EWebVideoState UWebVideoComponent::GetCurrentPlayerState()
         default:               return EWebVideoState::Idle;
     }
 }
-
 float UWebVideoComponent::GetCurrentTime()
 {
     return (VLCMediaPlayer) ? static_cast<float>(libvlc_media_player_get_time(VLCMediaPlayer)) / 1000.0f : 0.0f;
 }
-
 float UWebVideoComponent::GetTotalDuration()
 {
     if (!VLCMediaPlayer) return 0.0f;
     int64 Length = libvlc_media_player_get_length(VLCMediaPlayer);
     return (Length <= 0) ? CurrentVideoDuration : static_cast<float>(Length) / 1000.0f;
-}
-
-void UWebVideoComponent::Update3DAudio()
-{
-    if (!VLCMediaPlayer) return;
-    if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
-    {
-        if (APawn* Pawn = PC->GetPawn())
-        {
-            FVector SourcePos = ResolvedMesh ? ResolvedMesh->GetComponentLocation() : GetOwner()->GetActorLocation();
-            float Dist = FVector::Dist(Pawn->GetActorLocation(), SourcePos);
-            float Alpha = 1.0f - FMath::Clamp((Dist - MinSoundDistance) / (MaxSoundDistance - MinSoundDistance), 0.0f, 1.0f);
-            libvlc_audio_set_volume(VLCMediaPlayer, FMath::RoundToInt(Alpha * InitialVolume));
-        }
-    }
 }
 
 void UWebVideoComponent::UpdateTexture()
@@ -196,7 +186,7 @@ void UWebVideoComponent::UpdateTexture()
         if (libvlc_video_get_size(VLCMediaPlayer, 0, &Width, &Height) == 0)
         {
             float Ratio = static_cast<float>(Width) / static_cast<float>(Height);
-            DynamicMat->SetScalarParameterValue(FName("VideoAspectRatio"), Ratio);
+            DynamicMat->SetScalarParameterValue(VideoRatioParameterName, Ratio);
         }
     }
     if (RenderMutex.TryLock())
@@ -205,7 +195,6 @@ void UWebVideoComponent::UpdateTexture()
         RenderMutex.Unlock();
     }
 }
-
 void UWebVideoComponent::UpdateSurfaceAspectRatio()
 {
     if (!ResolvedMesh || !DynamicMat) return;
@@ -244,20 +233,37 @@ void UWebVideoComponent::UpdateSurfaceAspectRatio()
     {
         FVector Size = MaxBounds - MinBounds;
 
-        float Horizontal = FMath::Max(Size.X, Size.Y); 
-        float Vertical = Size.Z;
+        float Dims[3] = { 
+            static_cast<float>(FMath::Abs(Size.X)), 
+            static_cast<float>(FMath::Abs(Size.Y)), 
+            static_cast<float>(FMath::Abs(Size.Z)) 
+        };
+        
+        float Horizontal = FMath::Max(Dims[0], Dims[1]); 
+        float Vertical = FMath::Max(FMath::Min(Dims[0], Dims[1]), Dims[2]);
 
-        if (Vertical > 0.1f)
+        if (Vertical > 0.01f)
         {
             float SurfaceRatio = Horizontal / Vertical;
-            
-            DynamicMat->SetScalarParameterValue(TEXT("SurfaceAspectRatio"), SurfaceRatio);
-            UE_LOG(LogTemp, Log, TEXT("WebVideo: Auto-Detected Screen Ratio: %f (H:%f V:%f)"), SurfaceRatio, Horizontal, Vertical);
+            DynamicMat->SetScalarParameterValue(ScreenRatioParameterName, SurfaceRatio);
         }
     }
 }
-
-void UWebVideoComponent::Internal_StartVideo(FString DirectURL)
+void UWebVideoComponent::Update3DAudio()
+{
+    if (!VLCMediaPlayer) return;
+    if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+    {
+        if (APawn* Pawn = PC->GetPawn())
+        {
+            FVector SourcePos = ResolvedMesh ? ResolvedMesh->GetComponentLocation() : GetOwner()->GetActorLocation();
+            float Dist = FVector::Dist(Pawn->GetActorLocation(), SourcePos);
+            float Alpha = 1.0f - FMath::Clamp((Dist - MinSoundDistance) / (MaxSoundDistance - MinSoundDistance), 0.0f, 1.0f);
+            libvlc_audio_set_volume(VLCMediaPlayer, FMath::RoundToInt(Alpha * InitialVolume));
+        }
+    }
+}
+void UWebVideoComponent::PrivatePlayVideo(FString DirectURL)
 {
     if (!VLCInstance || !VLCMediaPlayer) return;
     FTCHARToUTF8 Converter(*DirectURL);
@@ -269,23 +275,14 @@ void UWebVideoComponent::Internal_StartVideo(FString DirectURL)
     }
 }
 
-void* UWebVideoComponent::vlc_video_lock(void* data, void** p_pixels)
+void* UWebVideoComponent::VLCVidLock(void* data, void** p_pixels)
 {
     UWebVideoComponent* Self = static_cast<UWebVideoComponent*>(data);
     if (Self) { Self->RenderMutex.Lock(); *p_pixels = Self->PixelBuffer.GetData(); }
     return nullptr;
 }
-
-void UWebVideoComponent::vlc_video_unlock(void* data, void* id, void* const* p_pixels)
+void UWebVideoComponent::VLCVidUnlock(void* data, void* id, void* const* p_pixels)
 {
     if (UWebVideoComponent* Self = static_cast<UWebVideoComponent*>(data)) Self->RenderMutex.Unlock();
 }
-
-void UWebVideoComponent::vlc_video_display(void* data, void* id) {}
-
-void UWebVideoComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
-{
-    if (VLCMediaPlayer) { libvlc_media_player_stop(VLCMediaPlayer); libvlc_media_player_release(VLCMediaPlayer); }
-    if (VLCInstance) libvlc_release(VLCInstance);
-    Super::EndPlay(EndPlayReason);
-}
+void UWebVideoComponent::VLCVidDisplay(void* data, void* id) {}

@@ -24,7 +24,12 @@ class WEBVIDEOSTREAM_API UWebVideoComponent : public UActorComponent
 
 public:	
     UWebVideoComponent();
-
+protected:
+    virtual void BeginPlay() override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+    virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+    
+public:
     // --- Settings: Rendering ---
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings")
     FComponentReference TargetMesh;
@@ -34,9 +39,15 @@ public:
     
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings")
     FName TextureParameterName = FName("VideoInput");
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings")
+    FName VideoRatioParameterName = FName("VideoAspectRatio");
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings")
+    FName ScreenRatioParameterName = FName("ScreenAspectRatio");
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings")
-    bool bUseMaterialSlot = true;
+    bool bUseMaterialSlot = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WebVideo|Settings", meta = (EditCondition = "bUseMaterialSlot"))
     int32 TargetMaterialSlot = 0;
@@ -103,20 +114,8 @@ protected:
     UPROPERTY(BlueprintReadOnly, Category = "WebVideo")
     float CurrentVideoDuration = 0.0f;
 
-    virtual void BeginPlay() override;
-    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
-    virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
 private:
-    libvlc_instance_t* VLCInstance = nullptr;
-    libvlc_media_player_t* VLCMediaPlayer = nullptr;
-
-    void UpdateTexture();
-    void UpdateSurfaceAspectRatio();
-    static void* vlc_video_lock(void* data, void** p_pixels);
-    static void vlc_video_unlock(void* data, void* id, void* const* p_pixels);
-    static void vlc_video_display(void* data, void* id);
-    
     UPROPERTY()
     UMeshComponent* ResolvedMesh;
 
@@ -125,14 +124,26 @@ private:
     
     UPROPERTY()
     UMaterialInstanceDynamic* DynamicMat;
-
+    
+    libvlc_instance_t* VLCInstance = nullptr;
+    libvlc_media_player_t* VLCMediaPlayer = nullptr;
     TArray<uint8> PixelBuffer;
     FUpdateTextureRegion2D UpdateRegion;
     const int32 VideoWidth = 1280;
     const int32 VideoHeight = 720;
     FCriticalSection RenderMutex;
-
-    void Update3DAudio();
-    void Internal_StartVideo(FString DirectURL);
     EWebVideoState LastKnownState = EWebVideoState::Idle;
+
+    void UpdateTexture();
+    void UpdateSurfaceAspectRatio();
+    void Update3DAudio();
+    void PrivatePlayVideo(FString DirectURL);
+    
+    static void* VLCVidLock(void* data, void** p_pixels);
+    static void VLCVidUnlock(void* data, void* id, void* const* p_pixels);
+    static void VLCVidDisplay(void* data, void* id);
+    
+    // --- Editors only ---
+#if WITH_EDITOR
+#endif
 };
